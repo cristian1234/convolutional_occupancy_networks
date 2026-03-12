@@ -1,0 +1,17 @@
+torch>=2.0
+torchvision
+torchaudio
+torch-scatter
+numpy<2.0
+scipy
+matplotlib
+trimesh
+pyyaml
+tqdm
+tensorboardX
+Pillow
+pandas
+pykdtree
+plyfile
+scikit-image
+h5py
