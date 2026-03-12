@@ -11,6 +11,8 @@ Resume from checkpoint:
     torchrun --nproc_per_node=4 train_ddp.py configs/voxel_completion/corridor_grid64.yaml --resume
 '''
 import os
+import signal
+import sys
 import torch
 import torch.optim as optim
 import torch.distributed as dist
@@ -29,6 +31,27 @@ from src import config, data
 from src.checkpoints import CheckpointIO
 from src.conv_onet import training
 from collections import defaultdict
+
+# Global references for signal handler
+_checkpoint_io = None
+_training_state = {'epoch_it': 0, 'it': 0, 'metric_val_best': None}
+_rank = 0
+
+
+def _signal_handler(signum, frame):
+    '''Handle Ctrl+C: save checkpoint and clean up DDP.'''
+    global _checkpoint_io, _training_state, _rank
+    if _rank == 0:
+        print(f'\nInterrupted (signal {signum}). Saving checkpoint...')
+        if _checkpoint_io is not None:
+            try:
+                _checkpoint_io.save('model.pt', **_training_state)
+                print('Checkpoint saved.')
+            except Exception as e:
+                print(f'Failed to save checkpoint: {e}')
+    if dist.is_initialized():
+        dist.destroy_process_group()
+    sys.exit(0)
 
 
 def setup_ddp():
@@ -66,6 +89,12 @@ def main():
     # DDP setup
     rank, world_size, local_rank = setup_ddp()
     device = torch.device(f'cuda:{local_rank}')
+
+    # Register signal handler for clean shutdown
+    global _rank
+    _rank = rank
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
 
     if is_main(rank):
         print(f'DDP: {world_size} GPUs, backend=nccl')
@@ -166,6 +195,12 @@ def main():
     it = 0
     metric_val_best = -model_selection_sign * np.inf
 
+    # Wire up signal handler globals
+    global _checkpoint_io, _training_state
+    _checkpoint_io = checkpoint_io
+    _training_state = {'epoch_it': epoch_it, 'it': it,
+                       'loss_val_best': metric_val_best}
+
     if args.resume:
         try:
             load_dict = checkpoint_io.load('model.pt')
@@ -201,6 +236,11 @@ def main():
         for batch in train_loader:
             it += 1
             loss = trainer.train_step(batch)
+
+            # Keep signal handler state up to date
+            _training_state['epoch_it'] = epoch_it
+            _training_state['it'] = it
+            _training_state['loss_val_best'] = metric_val_best
 
             if is_main(rank):
                 logger.add_scalar('train/loss', loss, it)
