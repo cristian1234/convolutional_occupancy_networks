@@ -96,11 +96,15 @@ def get_trainer(model, optimizer, cfg, device, **kwargs):
     vis_dir = os.path.join(out_dir, 'vis')
     input_type = cfg['data']['input_type']
 
+    # Completion weight for masked regions
+    completion_weight = cfg['training'].get('completion_weight', 1.0)
+
     trainer = training.Trainer(
         model, optimizer,
         device=device, input_type=input_type,
         vis_dir=vis_dir, threshold=threshold,
         eval_sample=cfg['training']['eval_sample'],
+        completion_weight=completion_weight,
     )
 
     return trainer
@@ -168,9 +172,34 @@ def get_data_fields(mode, cfg):
         cfg (dict): imported yaml config
     '''
     points_transform = data.SubsamplePoints(cfg['data']['points_subsample'])
-    
+
     input_type = cfg['data']['input_type']
     fields = {}
+
+    if input_type == 'voxel_masked':
+        # For voxel completion: use query points from the points_iou file
+        # for both training and evaluation
+        points_iou_file = cfg['data']['points_iou_file']
+        if points_iou_file is not None:
+            fields['points'] = data.PointsField(
+                points_iou_file, points_transform,
+                unpackbits=cfg['data']['points_unpackbits'],
+                multi_files=cfg['data']['multi_files']
+            )
+
+        if mode in ('val', 'test'):
+            if points_iou_file is not None:
+                fields['points_iou'] = data.PointsField(
+                    points_iou_file,
+                    unpackbits=cfg['data']['points_unpackbits'],
+                    multi_files=cfg['data']['multi_files']
+                )
+
+        # Ground truth voxels and mask for evaluation
+        fields['voxels_gt'] = data.MaskedVoxelsField('voxels.npy')
+        fields['mask'] = data.MaskedVoxelsField('mask.npy')
+        return fields
+
     if cfg['data']['points_file'] is not None:
         if input_type != 'pointcloud_crop':
             fields['points'] = data.PointsField(
@@ -180,13 +209,13 @@ def get_data_fields(mode, cfg):
             )
         else:
             fields['points'] = data.PatchPointsField(
-                cfg['data']['points_file'], 
+                cfg['data']['points_file'],
                 transform=points_transform,
                 unpackbits=cfg['data']['points_unpackbits'],
                 multi_files=cfg['data']['multi_files']
             )
 
-    
+
     if mode in ('val', 'test'):
         points_iou_file = cfg['data']['points_iou_file']
         voxels_file = cfg['data']['voxels_file']

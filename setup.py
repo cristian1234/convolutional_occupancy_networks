@@ -5,6 +5,7 @@ except ImportError:
 from distutils.extension import Extension
 from Cython.Build import cythonize
 from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension
+from setuptools.command.build_ext import build_ext as _build_ext
 import numpy
 
 
@@ -20,8 +21,8 @@ pykdtree = Extension(
         'src/utils/libkdtree/pykdtree/_kdtree_core.c'
     ],
     language='c',
-    extra_compile_args=['-std=c99', '-O3', '-fopenmp'],
-    extra_link_args=['-lgomp'],
+    extra_compile_args=['-std=c99', '-O3'],
+    extra_link_args=[],
     include_dirs=[numpy_include_dir]
 )
 
@@ -34,7 +35,7 @@ mcubes_module = Extension(
         'src/utils/libmcubes/marchingcubes.cpp'
     ],
     language='c++',
-    extra_compile_args=['-std=c++11'],
+    extra_compile_args=['-std=c++11', '-Wno-c++11-narrowing'],
     include_dirs=[numpy_include_dir]
 )
 
@@ -75,8 +76,8 @@ voxelize_module = Extension(
 )
 
 # Gather all extension modules
+# Note: pykdtree excluded - use system pykdtree package instead
 ext_modules = [
-    pykdtree,
     mcubes_module,
     triangle_hash_module,
     mise_module,
@@ -87,6 +88,6 @@ ext_modules = [
 setup(
     ext_modules=cythonize(ext_modules),
     cmdclass={
-        'build_ext': BuildExtension
+        'build_ext': _build_ext
     }
 )

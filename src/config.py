@@ -19,7 +19,7 @@ def load_config(path, default_path=None):
     '''
     # Load configuration from file itself
     with open(path, 'r') as f:
-        cfg_special = yaml.load(f)
+        cfg_special = yaml.load(f, Loader=yaml.SafeLoader)
 
     # Check if we should inherit from a config
     inherit_from = cfg_special.get('inherit_from')
@@ -30,7 +30,7 @@ def load_config(path, default_path=None):
         cfg = load_config(inherit_from, default_path)
     elif default_path is not None:
         with open(default_path, 'r') as f:
-            cfg = yaml.load(f)
+            cfg = yaml.load(f, Loader=yaml.SafeLoader)
     else:
         cfg = dict()
 
@@ -194,6 +194,11 @@ def get_inputs_field(mode, cfg):
     elif input_type == 'voxels':
         inputs_field = data.VoxelsField(
             cfg['data']['voxels_file']
+        )
+    elif input_type == 'voxel_masked':
+        inputs_field = data.MaskedVoxelInputField(
+            voxels_file='voxels_partial.npy',
+            mask_file='mask.npy',
         )
     elif input_type == 'idx':
         inputs_field = data.IndexField()

@@ -4,7 +4,8 @@ from src.data.core import (
 )
 from src.data.fields import (
     IndexField, PointsField,
-    VoxelsField, PatchPointsField, PointCloudField, PatchPointCloudField, PartialPointCloudField, 
+    VoxelsField, PatchPointsField, PointCloudField, PatchPointCloudField, PartialPointCloudField,
+    MaskedVoxelsField, MaskedVoxelInputField,
 )
 from src.data.transforms import (
     PointcloudNoise, SubsamplePointcloud,
@@ -23,6 +24,8 @@ __all__ = [
     PartialPointCloudField,
     PatchPointCloudField,
     PatchPointsField,
+    MaskedVoxelsField,
+    MaskedVoxelInputField,
     # Transforms
     PointcloudNoise,
     SubsamplePointcloud,

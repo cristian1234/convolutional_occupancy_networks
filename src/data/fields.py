@@ -192,6 +192,80 @@ class VoxelsField(Field):
         return complete
 
 
+class MaskedVoxelsField(Field):
+    ''' Field for loading .npy voxel grids (used for masked completion).
+
+    Loads raw numpy voxel grids without binvox format.
+
+    Args:
+        file_name (str): file name (e.g. 'voxels.npy', 'mask.npy')
+    '''
+    def __init__(self, file_name):
+        self.file_name = file_name
+
+    def load(self, model_path, idx, category):
+        ''' Loads the voxel grid.
+
+        Args:
+            model_path (str): path to model
+            idx (int): ID of data point
+            category (int): index of category
+        '''
+        file_path = os.path.join(model_path, self.file_name)
+        voxels = np.load(file_path).astype(np.float32)
+        return voxels
+
+    def check_complete(self, files):
+        ''' Check if field is complete.
+
+        Args:
+            files: files
+        '''
+        return self.file_name in files
+
+
+class MaskedVoxelInputField(Field):
+    ''' Field for loading 2-channel voxel input (partial + mask).
+
+    Loads voxels_partial.npy and mask.npy and stacks them as a
+    2-channel tensor (C, D, H, W).
+
+    Args:
+        voxels_file (str): partial voxels filename
+        mask_file (str): mask filename
+    '''
+    def __init__(self, voxels_file='voxels_partial.npy',
+                 mask_file='mask.npy'):
+        self.voxels_file = voxels_file
+        self.mask_file = mask_file
+
+    def load(self, model_path, idx, category):
+        ''' Loads the 2-channel input.
+
+        Args:
+            model_path (str): path to model
+            idx (int): ID of data point
+            category (int): index of category
+        '''
+        voxels_path = os.path.join(model_path, self.voxels_file)
+        mask_path = os.path.join(model_path, self.mask_file)
+
+        voxels = np.load(voxels_path).astype(np.float32)
+        mask = np.load(mask_path).astype(np.float32)
+
+        # Stack as (2, D, H, W)
+        result = np.stack([voxels, mask], axis=0)
+        return result
+
+    def check_complete(self, files):
+        ''' Check if field is complete.
+
+        Args:
+            files: files
+        '''
+        return (self.voxels_file in files and self.mask_file in files)
+
+
 class PatchPointCloudField(Field):
     ''' Patch point cloud field.
 

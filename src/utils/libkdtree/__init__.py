@@ -1,4 +1,7 @@
-from .pykdtree.kdtree import KDTree
+try:
+    from .pykdtree.kdtree import KDTree
+except ImportError:
+    from pykdtree.kdtree import KDTree
 
 
 __all__ = [

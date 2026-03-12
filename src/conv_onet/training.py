@@ -24,7 +24,8 @@ class Trainer(BaseTrainer):
     '''
 
     def __init__(self, model, optimizer, device=None, input_type='pointcloud',
-                 vis_dir=None, threshold=0.5, eval_sample=False):
+                 vis_dir=None, threshold=0.5, eval_sample=False,
+                 completion_weight=1.0):
         self.model = model
         self.optimizer = optimizer
         self.device = device
@@ -32,6 +33,7 @@ class Trainer(BaseTrainer):
         self.vis_dir = vis_dir
         self.threshold = threshold
         self.eval_sample = eval_sample
+        self.completion_weight = completion_weight
 
         if vis_dir is not None and not os.path.exists(vis_dir):
             os.makedirs(vis_dir)
@@ -122,7 +124,7 @@ class Trainer(BaseTrainer):
         p = data.get('points').to(device)
         occ = data.get('points.occ').to(device)
         inputs = data.get('inputs', torch.empty(p.size(0), 0)).to(device)
-        
+
         if 'pointcloud_crop' in data.keys():
             # add pre-computed index
             inputs = add_key(inputs, data.get('inputs.ind'), 'points', 'index', device=device)
@@ -137,6 +139,38 @@ class Trainer(BaseTrainer):
         logits = self.model.decode(p, c, **kwargs).logits
         loss_i = F.binary_cross_entropy_with_logits(
             logits, occ, reduction='none')
+
+        # Apply completion weight for voxel_masked input
+        if (self.input_type == 'voxel_masked' and
+                self.completion_weight != 1.0 and
+                'mask' in data):
+            # Get the mask to determine which query points are in completion zone
+            mask_vol = data['mask'].to(device)  # (B, D, H, W)
+            # Map query point positions to mask values
+            # p is (B, N, 3) in [-0.5, 0.5] range
+            p_coords = p
+            if isinstance(p, dict):
+                p_coords = p['p']
+            # Normalize to [0, 1] and then to grid indices
+            p_norm = (p_coords + 0.5).clamp(0, 1)  # (B, N, 3)
+            grid_size = mask_vol.shape[-1]
+            p_idx = (p_norm * (grid_size - 1)).long().clamp(0, grid_size - 1)
+            # Look up mask values for each query point
+            batch_size = p_idx.size(0)
+            point_mask = torch.zeros(batch_size, p_idx.size(1), device=device)
+            for b in range(batch_size):
+                point_mask[b] = mask_vol[b,
+                                         p_idx[b, :, 0],
+                                         p_idx[b, :, 1],
+                                         p_idx[b, :, 2]]
+            # Weight: 1.0 for known, completion_weight for unknown
+            weights = torch.where(
+                point_mask > 0.5,
+                torch.ones_like(point_mask),
+                torch.full_like(point_mask, self.completion_weight)
+            )
+            loss_i = loss_i * weights
+
         loss = loss_i.sum(-1).mean()
 
         return loss
