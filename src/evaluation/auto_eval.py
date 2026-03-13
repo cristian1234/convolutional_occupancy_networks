@@ -67,7 +67,8 @@ def evaluate(model, val_dataset, device, n_samples=50, threshold=0.5):
 
             c = model.encode_inputs(inputs_t)
 
-            grid_size = 64
+            gt = gt_voxels_data if isinstance(gt_voxels_data, np.ndarray) else gt_voxels_data.numpy()
+            grid_size = gt.shape[0]
             query_points = make_3d_grid(
                 (-0.5,) * 3, (0.5,) * 3, (grid_size,) * 3
             )
@@ -77,7 +78,6 @@ def evaluate(model, val_dataset, device, n_samples=50, threshold=0.5):
             pred = (torch.sigmoid(occ_logits) >= threshold).squeeze(0).cpu().numpy()
             pred = pred.reshape(grid_size, grid_size, grid_size).astype(np.float32)
 
-        gt = gt_voxels_data if isinstance(gt_voxels_data, np.ndarray) else gt_voxels_data.numpy()
         mask = mask_data if isinstance(mask_data, np.ndarray) else mask_data.numpy()
 
         gt_binary = (gt >= 0.5).astype(np.float32)
@@ -299,14 +299,13 @@ def save_voxel_snapshots(model, test_samples, iteration, out_dir, device,
                 inputs_t = inputs.unsqueeze(0).to(device)
 
             c = model.encode_inputs(inputs_t)
-            grid_size = 64
+            gt = gt_voxels if isinstance(gt_voxels, np.ndarray) else gt_voxels.numpy()
+            grid_size = gt.shape[0]
             qp = make_3d_grid((-0.5,)*3, (0.5,)*3, (grid_size,)*3)
             qp = qp.unsqueeze(0).to(device)
             occ = model.decode(qp, c).logits
             pred = (torch.sigmoid(occ) >= threshold).squeeze(0).cpu().numpy()
             pred = pred.reshape(grid_size, grid_size, grid_size).astype(np.float32)
-
-        gt = gt_voxels if isinstance(gt_voxels, np.ndarray) else gt_voxels.numpy()
 
         # Get partial input (channel 0 of inputs)
         if isinstance(inputs, np.ndarray):
