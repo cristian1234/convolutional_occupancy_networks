@@ -338,6 +338,34 @@ def create_sliding_mask(window_size, step_size, direction):
     return mask
 
 
+def compute_zone_iou(voxels, direction, step_size):
+    '''Compute IoU between unknown zone and adjacent known zone.
+
+    High IoU = geometry continues the same (boring straight corridor).
+    Low IoU = geometry is changing (corner, intersection, dead end).
+    '''
+    if direction == '+x':
+        unknown = voxels[-step_size:, :, :]
+        adjacent = voxels[-2*step_size:-step_size, :, :]
+    elif direction == '-x':
+        unknown = voxels[:step_size, :, :]
+        adjacent = voxels[step_size:2*step_size, :, :]
+    elif direction == '+y':
+        unknown = voxels[:, -step_size:, :]
+        adjacent = voxels[:, -2*step_size:-step_size, :]
+    elif direction == '-y':
+        unknown = voxels[:, :step_size, :]
+        adjacent = voxels[:, step_size:2*step_size, :]
+
+    a_bin = unknown >= 0.5
+    b_bin = adjacent >= 0.5
+    inter = (a_bin & b_bin).sum()
+    union = (a_bin | b_bin).sum()
+    if union == 0:
+        return 1.0
+    return float(inter) / float(union)
+
+
 def generate_query_points(voxels, n_points=50000):
     '''Generate query points with balanced near-surface/uniform sampling.'''
     grid_size = voxels.shape[0]
@@ -433,24 +461,45 @@ def process_single_map(args):
             seen.add(key)
             unique_samples.append((window, direction))
 
-    # Filter: limit samples where unknown zone is entirely empty.
-    windows_with_occ = []
-    windows_empty = []
+    # Classify samples by IoU and balance boring vs interesting
+    windows_boring = []      # IoU > 0.70 — geometry continues the same
+    windows_interesting = [] # IoU <= 0.70 — geometry changes (corners, etc)
+    windows_empty = []       # unknown zone is entirely empty
+
     for window, direction in unique_samples:
         mask = create_sliding_mask(grid_size, step_size, direction)
         unknown_mask = mask < 0.5
-        if (window[unknown_mask] >= 0.5).any():
-            windows_with_occ.append((window, direction))
-        else:
+        if not (window[unknown_mask] >= 0.5).any():
             windows_empty.append((window, direction))
+            continue
+
+        iou = compute_zone_iou(window, direction, step_size)
+        if iou > 0.70:
+            windows_boring.append((window, direction))
+        else:
+            windows_interesting.append((window, direction))
+
+    # Oversample interesting samples to reach ~50/50 balance with boring
+    if len(windows_interesting) > 0 and len(windows_boring) > 0:
+        target = len(windows_boring)
+        if len(windows_interesting) < target:
+            # Repeat interesting samples to match boring count
+            repeats = target // len(windows_interesting)
+            remainder = target % len(windows_interesting)
+            oversampled = windows_interesting * repeats
+            if remainder > 0:
+                idx = np.random.choice(len(windows_interesting), remainder, replace=False)
+                oversampled += [windows_interesting[i] for i in idx]
+            windows_interesting = oversampled
 
     # Allow up to 25% empty-unknown (model needs to learn "nothing here")
-    max_empty = max(1, len(windows_with_occ) // 3)
+    n_non_empty = len(windows_boring) + len(windows_interesting)
+    max_empty = max(1, n_non_empty // 3)
     if len(windows_empty) > max_empty:
         np.random.shuffle(windows_empty)
         windows_empty = windows_empty[:max_empty]
 
-    filtered = windows_with_occ + windows_empty
+    filtered = windows_boring + windows_interesting + windows_empty
     np.random.shuffle(filtered)
 
     # Save each sample
