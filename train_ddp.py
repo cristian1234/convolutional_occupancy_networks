@@ -181,11 +181,13 @@ def main():
     # Trainer uses the underlying model (not DDP wrapper) for encode/decode
     # but DDP wrapper for the forward pass that computes gradients
     completion_weight = cfg['training'].get('completion_weight', 1.0)
+    pos_weight = cfg['training'].get('pos_weight', 1.0)
     trainer = DDPTrainer(
         ddp_model, optimizer, device=device,
         input_type=cfg['data']['input_type'],
         threshold=cfg['test']['threshold'],
         completion_weight=completion_weight,
+        pos_weight=pos_weight,
     )
 
     # Checkpoint
@@ -341,7 +343,7 @@ class DDPTrainer(training.Trainer):
 
     def __init__(self, ddp_model, optimizer, device=None,
                  input_type='pointcloud', threshold=0.5,
-                 completion_weight=1.0):
+                 completion_weight=1.0, pos_weight=1.0):
         # The DDP model wraps the original ConvONet
         self.ddp_model = ddp_model
         self.model = ddp_model.module  # underlying model for eval
@@ -351,6 +353,8 @@ class DDPTrainer(training.Trainer):
         self.threshold = threshold
         self.eval_sample = False
         self.completion_weight = completion_weight
+        self.pos_weight = pos_weight
+        self.connectivity_weight = 0.0
         self.vis_dir = None
 
     def train_step(self, data):
@@ -384,8 +388,9 @@ class DDPTrainer(training.Trainer):
 
         kwargs = {}
         logits = self.ddp_model.module.decode(p, c, **kwargs).logits
+        pw = torch.tensor([self.pos_weight], device=device) if self.pos_weight != 1.0 else None
         loss_i = F.binary_cross_entropy_with_logits(
-            logits, occ, reduction='none')
+            logits, occ, reduction='none', pos_weight=pw)
 
         # Weighted loss for completion zone
         if (self.input_type == 'voxel_masked' and

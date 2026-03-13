@@ -9,6 +9,19 @@ from src.common import (
 from src.utils import visualize as vis
 from src.training import BaseTrainer
 
+
+# 3x3x3 neighbor-counting kernel for connectivity loss
+_NEIGHBOR_KERNEL = None
+
+def _get_neighbor_kernel(device):
+    global _NEIGHBOR_KERNEL
+    if _NEIGHBOR_KERNEL is None or _NEIGHBOR_KERNEL.device != device:
+        k = torch.ones(1, 1, 3, 3, 3, device=device)
+        k[0, 0, 1, 1, 1] = 0  # exclude center
+        _NEIGHBOR_KERNEL = k
+    return _NEIGHBOR_KERNEL
+
+
 class Trainer(BaseTrainer):
     ''' Trainer object for the Occupancy Network.
 
@@ -20,12 +33,15 @@ class Trainer(BaseTrainer):
         vis_dir (str): visualization directory
         threshold (float): threshold value
         eval_sample (bool): whether to evaluate samples
-
+        completion_weight (float): extra weight on unknown-zone loss
+        pos_weight (float): weight on occupied voxels in BCE (balances empty/occupied)
+        connectivity_weight (float): weight for isolated-voxel penalty
     '''
 
     def __init__(self, model, optimizer, device=None, input_type='pointcloud',
                  vis_dir=None, threshold=0.5, eval_sample=False,
-                 completion_weight=1.0):
+                 completion_weight=1.0, pos_weight=1.0,
+                 connectivity_weight=0.0):
         self.model = model
         self.optimizer = optimizer
         self.device = device
@@ -34,6 +50,8 @@ class Trainer(BaseTrainer):
         self.threshold = threshold
         self.eval_sample = eval_sample
         self.completion_weight = completion_weight
+        self.pos_weight = pos_weight
+        self.connectivity_weight = connectivity_weight
 
         if vis_dir is not None and not os.path.exists(vis_dir):
             os.makedirs(vis_dir)
@@ -51,7 +69,7 @@ class Trainer(BaseTrainer):
         self.optimizer.step()
 
         return loss.item()
-    
+
     def eval_step(self, data):
         ''' Performs an evaluation step.
 
@@ -72,11 +90,11 @@ class Trainer(BaseTrainer):
 
         points_iou = data.get('points_iou').to(device)
         occ_iou = data.get('points_iou.occ').to(device)
-        
+
         batch_size = points.size(0)
 
         kwargs = {}
-        
+
         # add pre-computed index
         inputs = add_key(inputs, data.get('inputs.ind'), 'points', 'index', device=device)
         # add pre-computed normalized coordinates
@@ -85,7 +103,7 @@ class Trainer(BaseTrainer):
 
         # Compute iou
         with torch.no_grad():
-            p_out = self.model(points_iou, inputs, 
+            p_out = self.model(points_iou, inputs,
                                sample=self.eval_sample, **kwargs)
 
         occ_iou_np = (occ_iou >= 0.5).cpu().numpy()
@@ -93,6 +111,13 @@ class Trainer(BaseTrainer):
 
         iou = compute_iou(occ_iou_np, occ_iou_hat_np).mean()
         eval_dict['iou'] = iou
+
+        # Completion-zone metrics if mask available
+        if self.input_type == 'voxel_masked' and 'mask' in data:
+            self._compute_completion_metrics(
+                eval_dict, points_iou, occ_iou, p_out.probs,
+                data['mask'], threshold
+            )
 
         # Estimate voxel iou
         if voxels_occ is not None:
@@ -113,6 +138,50 @@ class Trainer(BaseTrainer):
             eval_dict['iou_voxels'] = iou_voxels
 
         return eval_dict
+
+    def _compute_completion_metrics(self, eval_dict, points, occ_gt, occ_pred_probs,
+                                     mask_data, threshold):
+        '''Compute per-zone metrics: completion IoU, precision, recall.'''
+        device = self.device
+        mask_vol = mask_data.to(device)
+        p_coords = points
+        if isinstance(p_coords, dict):
+            p_coords = p_coords['p']
+        p_norm = (p_coords + 0.5).clamp(0, 1)
+        grid_size = mask_vol.shape[-1]
+        p_idx = (p_norm * (grid_size - 1)).long().clamp(0, grid_size - 1)
+
+        batch_size = p_idx.size(0)
+        point_mask = torch.zeros(batch_size, p_idx.size(1), device=device)
+        for b in range(batch_size):
+            point_mask[b] = mask_vol[b, p_idx[b, :, 0], p_idx[b, :, 1], p_idx[b, :, 2]]
+
+        # Unknown zone points
+        unknown = point_mask < 0.5
+        gt = (occ_gt >= 0.5)
+        pred = (occ_pred_probs >= threshold)
+
+        # Per-sample, then average
+        comp_ious, comp_precs, comp_recalls = [], [], []
+        for b in range(batch_size):
+            unk_b = unknown[b]
+            gt_b = gt[b][unk_b]
+            pred_b = pred[b][unk_b]
+            if unk_b.sum() == 0:
+                continue
+            tp = (gt_b & pred_b).sum().float()
+            fp = (~gt_b & pred_b).sum().float()
+            fn = (gt_b & ~pred_b).sum().float()
+            union = tp + fp + fn
+            comp_ious.append((tp / union).item() if union > 0 else 1.0)
+            comp_precs.append((tp / (tp + fp)).item() if (tp + fp) > 0 else 1.0)
+            comp_recalls.append((tp / (tp + fn)).item() if (tp + fn) > 0 else 1.0)
+
+        if comp_ious:
+            import numpy as np
+            eval_dict['completion_iou'] = float(np.mean(comp_ious))
+            eval_dict['completion_precision'] = float(np.mean(comp_precs))
+            eval_dict['completion_recall'] = float(np.mean(comp_recalls))
 
     def compute_loss(self, data):
         ''' Computes the loss.
@@ -137,25 +206,23 @@ class Trainer(BaseTrainer):
         kwargs = {}
         # General points
         logits = self.model.decode(p, c, **kwargs).logits
+
+        # BCE with pos_weight to balance occupied/empty
+        pw = torch.tensor([self.pos_weight], device=device) if self.pos_weight != 1.0 else None
         loss_i = F.binary_cross_entropy_with_logits(
-            logits, occ, reduction='none')
+            logits, occ, reduction='none', pos_weight=pw)
 
         # Apply completion weight for voxel_masked input
         if (self.input_type == 'voxel_masked' and
                 self.completion_weight != 1.0 and
                 'mask' in data):
-            # Get the mask to determine which query points are in completion zone
-            mask_vol = data['mask'].to(device)  # (B, D, H, W)
-            # Map query point positions to mask values
-            # p is (B, N, 3) in [-0.5, 0.5] range
+            mask_vol = data['mask'].to(device)
             p_coords = p
             if isinstance(p, dict):
                 p_coords = p['p']
-            # Normalize to [0, 1] and then to grid indices
-            p_norm = (p_coords + 0.5).clamp(0, 1)  # (B, N, 3)
+            p_norm = (p_coords + 0.5).clamp(0, 1)
             grid_size = mask_vol.shape[-1]
             p_idx = (p_norm * (grid_size - 1)).long().clamp(0, grid_size - 1)
-            # Look up mask values for each query point
             batch_size = p_idx.size(0)
             point_mask = torch.zeros(batch_size, p_idx.size(1), device=device)
             for b in range(batch_size):
@@ -163,7 +230,6 @@ class Trainer(BaseTrainer):
                                          p_idx[b, :, 0],
                                          p_idx[b, :, 1],
                                          p_idx[b, :, 2]]
-            # Weight: 1.0 for known, completion_weight for unknown
             weights = torch.where(
                 point_mask > 0.5,
                 torch.ones_like(point_mask),
@@ -173,4 +239,41 @@ class Trainer(BaseTrainer):
 
         loss = loss_i.sum(-1).mean()
 
+        # Connectivity loss: penalize isolated occupied voxels
+        if (self.connectivity_weight > 0.0 and
+                self.input_type == 'voxel_masked'):
+            conn_loss = self._connectivity_loss(logits, p, c)
+            loss = loss + self.connectivity_weight * conn_loss
+
         return loss
+
+    def _connectivity_loss(self, logits, p, c):
+        '''Penalize occupied voxels with few occupied neighbors.
+
+        Decodes a dense 64^3 grid, applies sigmoid, then uses a 3x3x3
+        convolution to count neighbor occupancy. Occupied voxels with
+        low neighbor count get penalized.
+        '''
+        device = self.device
+        resolution = 64
+
+        # Decode a dense grid for connectivity check
+        with torch.no_grad():
+            grid_points = make_3d_grid(
+                (-0.5,) * 3, (0.5,) * 3, (resolution,) * 3
+            ).unsqueeze(0).expand(logits.size(0), -1, -1).to(device)
+
+        grid_logits = self.model.decode(grid_points, c).logits
+        grid_probs = torch.sigmoid(grid_logits)
+        grid_vol = grid_probs.view(-1, 1, resolution, resolution, resolution)
+
+        # Count occupied neighbors using 3x3x3 convolution
+        kernel = _get_neighbor_kernel(device)
+        neighbor_count = F.conv3d(grid_vol, kernel, padding=1)
+        # Max possible neighbors = 26
+
+        # Penalty: occupied voxels with few neighbors
+        # isolated_penalty = prob * max(0, threshold - neighbor_count / 26)
+        isolation = torch.clamp(3.0 - neighbor_count, min=0) / 3.0  # 0 if >=3 neighbors
+        penalty = grid_vol * isolation
+        return penalty.mean()

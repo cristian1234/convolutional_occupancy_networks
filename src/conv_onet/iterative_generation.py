@@ -3,94 +3,117 @@ import torch.nn.functional as F
 import numpy as np
 import logging
 from src.common import make_3d_grid, normalize_3d_coordinate
-from src.utils.voxel_utils import (
-    detect_openings, extract_overlap_region,
-    place_overlap_in_chunk, merge_chunks
-)
+from src.utils.voxel_utils import detect_openings
 
 logger = logging.getLogger(__name__)
 
 
 class IterativeGenerator3D(object):
-    ''' Iterative corridor generator using scene completion.
+    ''' Iterative corridor generator using sliding window completion.
 
-    Takes a trained completion model and generates corridors chunk by chunk,
-    using overlap regions for consistency.
+    Instead of generating whole chunks, slides a 64-voxel window forward
+    by a small step_size, predicting only a narrow strip of new voxels
+    at each step. This keeps ~90% of the window as known context.
 
     Args:
         model (nn.Module): trained ConvONet completion model
         device (device): pytorch device
         threshold (float): occupancy threshold
-        chunk_size (int): size of each voxel chunk (assumes cubic)
-        overlap_size (int): overlap between consecutive chunks
+        chunk_size (int): size of the model's input window (64)
+        step_size (int): new voxels to predict per step (default 4)
         generation_axis (int): axis along which to extend (0=X, 1=Y, 2=Z)
         padding (float): padding for coordinate normalization
+        overlap_size (int): legacy param, converted to step_size
     '''
 
     def __init__(self, model, device=None, threshold=0.5,
-                 chunk_size=64, overlap_size=16,
+                 chunk_size=64, step_size=4, overlap_size=None,
                  generation_axis=0, padding=0.1):
         self.model = model
         self.device = device
         self.threshold = threshold
         self.chunk_size = chunk_size
-        self.overlap_size = overlap_size
         self.generation_axis = generation_axis
         self.padding = padding
 
-    def generate_corridor(self, initial_voxels, max_chunks=10,
-                          return_intermediates=False):
-        ''' Generate a corridor by iteratively completing chunks.
+        # Legacy: if overlap_size given, convert
+        if overlap_size is not None:
+            self.step_size = min(step_size, chunk_size - overlap_size)
+        else:
+            self.step_size = step_size
+
+    def generate_corridor(self, initial_voxels, n_steps=None,
+                          max_chunks=10, return_intermediates=False):
+        ''' Generate a corridor by sliding window completion.
 
         Args:
             initial_voxels (numpy array): starting voxel grid (D, H, W)
-            max_chunks (int): maximum number of chunks to generate
-            return_intermediates (bool): whether to return individual chunks
+            n_steps (int): number of sliding steps
+            max_chunks (int): legacy param, converted to n_steps
+            return_intermediates (bool): return per-step snapshots
 
         Returns:
             numpy array: completed voxel grid
-            list (optional): list of individual chunks if return_intermediates
+            list (optional): list of per-step windows
         '''
         self.model.eval()
-        chunks = [initial_voxels.copy()]
-        chunk_shape = (self.chunk_size,) * 3
+        axis = self.generation_axis
+        cs = self.chunk_size
+        step = self.step_size
 
-        for i in range(max_chunks - 1):
-            logger.info(f'Generating chunk {i+1}/{max_chunks-1}')
+        if n_steps is None:
+            # Legacy: approximate old behavior
+            n_steps = max_chunks * cs // step
 
-            # Extract overlap from the end of the last chunk
-            prev_chunk = chunks[-1]
-            overlap = extract_overlap_region(
-                prev_chunk, self.overlap_size,
-                direction='forward', axis=self.generation_axis
+        corridor = initial_voxels.copy()
+        intermediates = [] if return_intermediates else None
+
+        for i in range(n_steps):
+            current_length = corridor.shape[axis]
+
+            # Extend corridor buffer with zeros for the new strip
+            extend_shape = list(corridor.shape)
+            extend_shape[axis] = step
+            corridor = np.concatenate(
+                [corridor, np.zeros(extend_shape, dtype=np.float32)],
+                axis=axis
             )
 
-            # Place overlap at the beginning of new chunk
-            new_chunk_voxels, mask = place_overlap_in_chunk(
-                chunk_shape, overlap, self.overlap_size,
-                direction='forward', axis=self.generation_axis
-            )
+            new_length = current_length + step
 
-            # Run completion
-            completed = self._complete_chunk(new_chunk_voxels, mask)
-            chunks.append(completed)
+            # Extract 64-voxel window ending at the new frontier
+            window_start = new_length - cs
+            window_slices = [slice(None)] * 3
+            window_slices[axis] = slice(window_start, new_length)
+            window_voxels = corridor[tuple(window_slices)].copy()
 
-            # Check if there's an opening to continue
-            openings = detect_openings(
-                completed, axis=self.generation_axis, threshold=0.3
-            )
-            if not openings['has_opening_end']:
-                logger.info(f'No opening detected at chunk {i+1}, stopping.')
-                break
+            # Mask: everything known except the last `step` voxels
+            mask = np.ones_like(window_voxels)
+            mask_slices = [slice(None)] * 3
+            mask_slices[axis] = slice(cs - step, cs)
+            mask[tuple(mask_slices)] = 0.0
 
-        # Merge all chunks
-        merged = merge_chunks(
-            chunks, self.overlap_size, axis=self.generation_axis
-        )
+            # Run model completion
+            completed = self._complete_chunk(window_voxels, mask)
+
+            # Write only the new strip back into the corridor
+            src_slices = [slice(None)] * 3
+            src_slices[axis] = slice(cs - step, cs)
+
+            dst_slices = [slice(None)] * 3
+            dst_slices[axis] = slice(new_length - step, new_length)
+
+            corridor[tuple(dst_slices)] = completed[tuple(src_slices)]
+
+            if return_intermediates:
+                intermediates.append(completed)
+
+            if (i + 1) % 10 == 0:
+                logger.info(f'Step {i+1}/{n_steps}')
 
         if return_intermediates:
-            return merged, chunks
-        return merged
+            return corridor, intermediates
+        return corridor
 
     def _complete_chunk(self, voxels, mask):
         ''' Complete a single chunk using the model.
@@ -140,7 +163,7 @@ class IterativeGenerator3D(object):
 
         Args:
             voxels (numpy array): binary voxel grid
-            output_path (str): optional path to save .ply file
+            output_path (str): optional path to save mesh
 
         Returns:
             trimesh.Trimesh: extracted mesh
@@ -149,20 +172,18 @@ class IterativeGenerator3D(object):
             from skimage.measure import marching_cubes
         except ImportError:
             from src.utils import libmcubes
-            # Pad to ensure watertight
             padded = np.pad(voxels, 1, 'constant', constant_values=0)
             vertices, triangles = libmcubes.marching_cubes(padded, 0.5)
-            vertices -= 1  # undo padding offset
+            vertices -= 1
             import trimesh
             mesh = trimesh.Trimesh(vertices, triangles, process=False)
             if output_path:
                 mesh.export(output_path)
             return mesh
 
-        # Use skimage marching cubes
         padded = np.pad(voxels, 1, 'constant', constant_values=0)
         vertices, faces, normals, _ = marching_cubes(padded, level=0.5)
-        vertices -= 1  # undo padding offset
+        vertices -= 1
 
         import trimesh
         mesh = trimesh.Trimesh(

@@ -1,0 +1,70 @@
+method: conv_onet
+data:
+  dataset: Shapes3D
+  path: data/corridors_sliding_32
+  classes: null
+  input_type: voxel_masked
+  train_split: train
+  val_split: val
+  test_split: test
+  dim: 3
+  points_file: null
+  points_iou_file: points_iou/points.npz
+  multi_files: null
+  points_subsample: 2048
+  points_unpackbits: false
+  voxels_file: voxels.npy
+  padding: 0.1
+model:
+  encoder: voxel_masked_local
+  encoder_kwargs:
+    in_channels: 2
+    unet3d: true
+    unet3d_kwargs:
+      num_levels: 3
+      f_maps: 16
+      in_channels: 16
+      out_channels: 16
+    plane_type: ['grid']
+    grid_resolution: 32
+  decoder: simple_local
+  decoder_kwargs:
+    sample_mode: bilinear
+    hidden_size: 16
+  c_dim: 16
+training:
+  out_dir: out/corridor_sliding_32
+  batch_size: 20
+  print_every: 100
+  visualize_every: 2000
+  checkpoint_every: 1000
+  validate_every: 1000
+  backup_every: 5000
+  eval_sample: false
+  model_selection_metric: iou
+  model_selection_mode: maximize
+  n_workers: 8
+  n_workers_val: 4
+  completion_weight: 2.0
+  eval_every: 2000
+  iterative_test_every: 5000
+test:
+  threshold: 0.5
+  eval_mesh: false
+  eval_pointcloud: false
+  remove_wall: false
+  model_file: model_best.pt
+generation:
+  batch_size: 100000
+  refinement_step: 0
+  vis_n_outputs: 5
+  generate_mesh: false
+  generate_pointcloud: false
+  generation_dir: generation
+  use_sampling: false
+  resolution_0: 32
+  upsampling_steps: 0
+  simplify_nfaces: null
+  copy_groundtruth: false
+  copy_input: false
+  sliding_window: false

@@ -76,10 +76,15 @@ def main():
 
     # Load model
     model = config.get_model(cfg, device=device)
-    checkpoint_io = CheckpointIO(
-        os.path.dirname(args.checkpoint), model=model
-    )
-    checkpoint_io.load(os.path.basename(args.checkpoint))
+
+    # Load checkpoint (map to current device if trained on different one)
+    checkpoint_path = args.checkpoint
+    state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    if 'model' in state_dict:
+        model.load_state_dict(state_dict['model'])
+    else:
+        model.load_state_dict(state_dict)
+    model.to(device)
     model.eval()
     print('Model loaded successfully')
 

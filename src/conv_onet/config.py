@@ -96,8 +96,10 @@ def get_trainer(model, optimizer, cfg, device, **kwargs):
     vis_dir = os.path.join(out_dir, 'vis')
     input_type = cfg['data']['input_type']
 
-    # Completion weight for masked regions
+    # Loss weights
     completion_weight = cfg['training'].get('completion_weight', 1.0)
+    pos_weight = cfg['training'].get('pos_weight', 1.0)
+    connectivity_weight = cfg['training'].get('connectivity_weight', 0.0)
 
     trainer = training.Trainer(
         model, optimizer,
@@ -105,6 +107,8 @@ def get_trainer(model, optimizer, cfg, device, **kwargs):
         vis_dir=vis_dir, threshold=threshold,
         eval_sample=cfg['training']['eval_sample'],
         completion_weight=completion_weight,
+        pos_weight=pos_weight,
+        connectivity_weight=connectivity_weight,
     )
 
     return trainer
