@@ -164,14 +164,13 @@ def render_all(model, test_samples, iteration, out_dir, device,
                 inputs_t = inputs.unsqueeze(0).to(device)
 
             c = model.encode_inputs(inputs_t)
-            grid_size = 64
+            gt = gt_voxels if isinstance(gt_voxels, np.ndarray) else gt_voxels.numpy()
+            grid_size = gt.shape[0]
             qp = make_3d_grid((-0.5,)*3, (0.5,)*3, (grid_size,)*3)
             qp = qp.unsqueeze(0).to(device)
             occ = model.decode(qp, c).logits
             pred = (torch.sigmoid(occ) >= threshold).squeeze(0).cpu().numpy()
             pred = pred.reshape(grid_size, grid_size, grid_size).astype(np.float32)
-
-        gt = gt_voxels if isinstance(gt_voxels, np.ndarray) else gt_voxels.numpy()
 
         # Get input visualization
         if isinstance(inputs, np.ndarray):
